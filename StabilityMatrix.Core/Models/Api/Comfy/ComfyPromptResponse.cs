@@ -13,4 +13,7 @@ public class ComfyPromptResponse
     
     [JsonPropertyName("node_errors")]
     public required Dictionary<string, object?> NodeErrors { get; set; }
+
+    [JsonPropertyName("graft")]
+    public ComfyGraftPromptInfo? Graft { get; set; }
 }

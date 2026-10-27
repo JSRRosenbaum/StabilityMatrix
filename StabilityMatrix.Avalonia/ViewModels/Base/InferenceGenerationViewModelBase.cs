@@ -286,7 +286,7 @@ public abstract partial class InferenceGenerationViewModelBase
             throw new InvalidOperationException("Project is null");
         if (args.OutputNodeNames.Count == 0)
             throw new InvalidOperationException("OutputNodeNames is empty");
-        if (client.OutputImagesDir is null)
+        if (!settingsManager.Settings.RemoteComfy.IsEnabled && client.OutputImagesDir is null)
             throw new InvalidOperationException("OutputImagesDir is null");
 
         // Only check extensions for first batch index
@@ -335,6 +335,17 @@ public abstract partial class InferenceGenerationViewModelBase
                 await DialogHelper.CreateApiExceptionDialog(e, "Api Error").ShowAsync();
                 return;
             }
+            catch (InvalidOperationException e) when (settingsManager.Settings.RemoteComfy.IsEnabled)
+            {
+                Logger.Warn(e, "Managed prompt requires reconciliation");
+                notificationService.ShowPersistent(
+                    "Managed job needs attention",
+                    e.Message,
+                    NotificationType.Warning
+                );
+                return;
+            }
+
 
             // Register progress handler
             promptTask.ProgressUpdate += OnProgressUpdateReceived;
@@ -759,6 +770,12 @@ public abstract partial class InferenceGenerationViewModelBase
         }
 
         // Get installed extensions
+        if (settingsManager.Settings.RemoteComfy.IsEnabled)
+        {
+            throw new ValidationException(
+                "This workflow requires custom extensions. Remote extension compatibility must be verified on the server; automatic local installation is disabled."
+            );
+        }
         var localPackagePair = ClientManager.Client?.LocalServerPackage.Unwrap()!;
         var manager = localPackagePair.BasePackage.ExtensionManager.Unwrap();
 

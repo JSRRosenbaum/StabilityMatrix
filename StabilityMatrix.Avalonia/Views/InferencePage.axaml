@@ -216,6 +216,9 @@
                                     IsEnabled="False"
                                     Text="{Binding ClientManager.Client.BaseAddress, Converter={StaticResource UriStringConverter}, FallbackValue=''}" />
                                 <ui:MenuFlyoutSeparator />
+                                <ui:MenuFlyoutItem
+                                    Command="{Binding OpenEditorCommand}"
+                                    Text="Open ComfyUI editor" />
                                 <ui:MenuFlyoutItem Command="{Binding DisconnectCommand}" Text="Disconnect">
                                     <ui:MenuFlyoutItem.IconSource>
                                         <fluentIcons:SymbolIconSource Symbol="PlugDisconnected" />

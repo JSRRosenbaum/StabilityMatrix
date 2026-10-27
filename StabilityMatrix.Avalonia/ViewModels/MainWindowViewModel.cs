@@ -243,7 +243,13 @@ public partial class MainWindowViewModel : ViewModelBase
             }
         }
 
-        if (Program.Args.DebugOneClickInstall || settingsManager.Settings.InstalledPackages.Count == 0)
+        if (
+            Program.Args.DebugOneClickInstall
+            || (
+                !settingsManager.Settings.RemoteComfy.IsEnabled
+                && settingsManager.Settings.InstalledPackages.Count == 0
+            )
+        )
         {
             var viewModel = dialogFactory.Get<NewOneClickInstallViewModel>();
             var dialog = new BetterContentDialog

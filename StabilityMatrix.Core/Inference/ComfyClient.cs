@@ -27,6 +27,9 @@ public class ComfyClient : InferenceClientBase
 
     private readonly WebsocketClient webSocketClient;
     private readonly IComfyApi comfyApi;
+    private readonly ManagedSubmissionJournal? managedSubmissionJournal;
+    private readonly SemaphoreSlim managedSubmissionGate = new(1, 1);
+    private ManagedSubmissionJournal.Entry? managedSubmission;
     private bool isDisposed;
 
     private readonly JsonSerializerOptions jsonSerializerOptions =
@@ -41,7 +44,9 @@ public class ComfyClient : InferenceClientBase
         };
 
     // ReSharper disable once MemberCanBePrivate.Global
-    public string ClientId { get; } = Guid.NewGuid().ToString();
+    public string ClientId { get; }
+
+    public string? ManagedJobId => managedSubmission?.PromptId;
 
     public Uri BaseAddress { get; }
 
@@ -70,6 +75,8 @@ public class ComfyClient : InferenceClientBase
     /// </summary>
     public ConcurrentDictionary<string, ComfyTask> PromptTasks { get; } = new();
 
+    public bool IsManaged => managedSubmissionJournal is not null;
+
     /// <summary>
     /// Current running prompt task
     /// </summary>
@@ -95,10 +102,18 @@ public class ComfyClient : InferenceClientBase
     /// </summary>
     public event EventHandler<ComfyWebSocketImageData>? PreviewImageReceived;
 
-    public ComfyClient(IApiFactory apiFactory, Uri baseAddress)
+    public ComfyClient(IApiFactory apiFactory, Uri baseAddress, string? managedSubmissionJournalPath = null)
     {
+        var apiBaseAddress = EnsureRefitBaseAddress(baseAddress);
+        if (managedSubmissionJournalPath is not null)
+        {
+            managedSubmissionJournal = new ManagedSubmissionJournal(managedSubmissionJournalPath);
+            managedSubmission = managedSubmissionJournal.Load();
+        }
+        ClientId = managedSubmission?.ClientId ?? Guid.NewGuid().ToString();
+
         comfyApi = apiFactory.CreateRefitClient<IComfyApi>(
-            baseAddress,
+            apiBaseAddress,
             new RefitSettings
             {
                 ContentSerializer = new SystemTextJsonContentSerializer(jsonSerializerOptions),
@@ -106,28 +121,56 @@ public class ComfyClient : InferenceClientBase
         );
         BaseAddress = baseAddress;
 
-        // Setup websocket client
-        var wsUri = new UriBuilder(baseAddress)
-        {
-            Scheme = "ws",
-            Path = "/ws",
-            Query = $"clientId={ClientId}"
-        }.Uri;
-
+        var wsUri = BuildWebSocketUri(baseAddress, ClientId);
         webSocketClient = new WebsocketClient(wsUri)
         {
             Name = nameof(ComfyClient),
             ReconnectTimeout = TimeSpan.FromSeconds(30)
         };
 
+
         webSocketClient.DisconnectionHappened.Subscribe(
             info => Logger.Info("Websocket Disconnected, ({Type})", info.Type)
         );
         webSocketClient.ReconnectionHappened.Subscribe(
-            info => Logger.Info("Websocket Reconnected, ({Type})", info.Type)
+            info =>
+            {
+                Logger.Info("Websocket Reconnected, ({Type})", info.Type);
+                if (managedSubmissionJournal is not null)
+                    _ = ReconcileAfterReconnectAsync();
+            }
         );
 
         webSocketClient.MessageReceived.Subscribe(OnMessageReceived);
+    }
+    internal static Uri EnsureTrailingSlash(Uri baseAddress)
+    {
+        if (baseAddress.AbsolutePath.EndsWith("/", StringComparison.Ordinal))
+            return baseAddress;
+
+        return new UriBuilder(baseAddress) { Path = $"{baseAddress.AbsolutePath}/" }.Uri;
+    }
+    internal static Uri EnsureRefitBaseAddress(Uri baseAddress)
+    {
+        var path = baseAddress.AbsolutePath;
+        if (path == "/" || !path.EndsWith("/", StringComparison.Ordinal))
+            return baseAddress;
+
+        return new UriBuilder(baseAddress) { Path = path.TrimEnd('/') }.Uri;
+    }
+
+    internal static Uri BuildWebSocketUri(Uri baseAddress, string clientId)
+    {
+        var apiRoot = EnsureTrailingSlash(baseAddress);
+        var builder = new UriBuilder(apiRoot)
+        {
+            Scheme = baseAddress.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+                ? "wss"
+                : "ws",
+            Path = $"{apiRoot.AbsolutePath}ws",
+            Query = $"clientId={Uri.EscapeDataString(clientId)}"
+        };
+        return builder.Uri;
     }
 
     private void OnMessageReceived(ResponseMessage message)
@@ -292,6 +335,11 @@ public class ComfyClient : InferenceClientBase
 
     public override async Task ConnectAsync(CancellationToken cancellationToken = default)
     {
+        // Canopy deliberately does not start a cold backend from a WebSocket.
+        // This read requests the managed runtime without starting local Python.
+        if (IsManaged)
+            await comfyApi.GetSystemStats(cancellationToken).ConfigureAwait(false);
+
         var delays = Backoff
             .DecorrelatedJitterBackoffV2(TimeSpan.FromMilliseconds(500), retryCount: 5)
             .ToImmutableArray();
@@ -303,6 +351,7 @@ public class ComfyClient : InferenceClientBase
             try
             {
                 await webSocketClient.StartOrFail().ConfigureAwait(false);
+                await ReconcileManagedSubmissionAsync(cancellationToken).ConfigureAwait(false);
                 return;
             }
             catch (WebsocketException e)
@@ -331,22 +380,229 @@ public class ComfyClient : InferenceClientBase
         CancellationToken cancellationToken = default
     )
     {
-        var request = new ComfyPromptRequest { ClientId = ClientId, Prompt = nodes };
-        var result = await comfyApi.PostPrompt(request, cancellationToken).ConfigureAwait(false);
+        if (managedSubmissionJournal is null)
+            return RegisterPrompt(await comfyApi.PostPrompt(
+                new ComfyPromptRequest { ClientId = ClientId, Prompt = nodes },
+                cancellationToken
+            ).ConfigureAwait(false));
 
-        // Add task to dictionary and set it as the current task
-        var task = new ComfyTask(result.PromptId);
-        PromptTasks.TryAdd(result.PromptId, task);
+        await managedSubmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (managedSubmission is not null)
+            {
+                var previous = await RefreshManagedSubmissionAsync(cancellationToken).ConfigureAwait(false);
+                if (!IsTerminal(previous.EffectiveState))
+                {
+                    if (IsAccepted(previous.EffectiveState))
+                        throw new InvalidOperationException(
+                            $"Managed Comfy job {previous.JobId} is still active (state: {previous.EffectiveState}). "
+                            + "This new prompt was not submitted. Reconcile or cancel the original job and wait for a terminal state before submitting new work.");
+                    throw UnresolvedSubmission(previous.JobId, previous.EffectiveState);
+                }
+            }
+
+            var promptId = Guid.NewGuid().ToString();
+            managedSubmission = new ManagedSubmissionJournal.Entry(ClientId, promptId, "submitting");
+            managedSubmissionJournal.Save(managedSubmission);
+
+            ComfyPromptResponse result;
+            try
+            {
+                result = await comfyApi.PostPrompt(
+                    new ComfyPromptRequest { ClientId = ClientId, PromptId = promptId, Prompt = nodes },
+                    cancellationToken
+                ).ConfigureAwait(false);
+            }
+            catch (ApiException e) when (IsDefinitiveRejection(e, promptId))
+            {
+                managedSubmission = managedSubmission with { State = "rejected" };
+                managedSubmissionJournal.Save(managedSubmission);
+                throw new InvalidOperationException(
+                    $"Managed Comfy job {promptId} was rejected before acceptance: {e.Content}", e);
+            }
+            catch (Exception e)
+            {
+                throw UnresolvedSubmission(promptId, "uncertain", e);
+            }
+
+            var state = result.Graft?.State ?? "uncertain";
+
+            if (!String.Equals(result.PromptId, promptId, StringComparison.Ordinal))
+            {
+                managedSubmission = managedSubmission with { State = "uncertain" };
+                managedSubmissionJournal.Save(managedSubmission);
+                throw UnresolvedSubmission(promptId, "uncertain");
+            }
+            managedSubmission = managedSubmission with { State = state };
+            managedSubmissionJournal.Save(managedSubmission);
+            if (IsUnresolved(state))
+                throw UnresolvedSubmission(promptId, state);
+            if (!IsAccepted(state) && !IsTerminal(state))
+                throw UnresolvedSubmission(promptId, state);
+            if (IsAccepted(state))
+                return await AttachManagedSubmissionAsync(promptId, cancellationToken).ConfigureAwait(false);
+
+            var task = RegisterPrompt(result);
+            SettleManagedTask(task, state);
+            return task;
+        }
+        finally
+        {
+            managedSubmissionGate.Release();
+        }
+    }
+
+    private ComfyTask RegisterPrompt(ComfyPromptResponse result)
+    {
+        var task = PromptTasks.GetOrAdd(result.PromptId, static id => new ComfyTask(id));
         currentPromptTask = task;
-
         return task;
+    }
+    private async Task<ComfyTask> AttachManagedSubmissionAsync(string jobId, CancellationToken cancellationToken)
+    {
+        var task = RegisterPrompt(new ComfyPromptResponse { PromptId = jobId, Number = 0, NodeErrors = new() });
+        var latest = await RefreshManagedSubmissionAsync(cancellationToken).ConfigureAwait(false);
+        var state = latest.EffectiveState;
+        if (IsTerminal(state))
+            SettleManagedTask(task, state);
+        else if (!IsAccepted(state))
+            throw UnresolvedSubmission(jobId, state);
+        return task;
+    }
+
+    private void SettleManagedTask(ComfyTask task, string state)
+    {
+        if (state == "completed")
+            task.TrySetResult();
+        else if (state is "failed" or "rejected")
+            task.TrySetException(new InvalidOperationException($"Managed Comfy job {task.Id} ended in state {state}."));
+        else if (state == "cancelled")
+            task.TrySetCanceled();
+        else
+            return;
+
+        PromptTasks.TryRemove(task.Id, out _);
+        if (ReferenceEquals(currentPromptTask, task))
+            currentPromptTask = null;
+    }
+
+    public async Task<ComfyGraftJob?> ReconcileManagedSubmissionAsync(
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (managedSubmissionJournal is null)
+            return null;
+
+        await managedSubmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (managedSubmission is null)
+                return null;
+            var job = await RefreshManagedSubmissionAsync(cancellationToken).ConfigureAwait(false);
+            if (IsTerminal(job.EffectiveState) && PromptTasks.TryGetValue(job.JobId, out var task))
+                SettleManagedTask(task, job.EffectiveState);
+            return job;
+        }
+        finally
+        {
+            managedSubmissionGate.Release();
+        }
+    }
+
+    private async Task<ComfyGraftJob> RefreshManagedSubmissionAsync(CancellationToken cancellationToken)
+    {
+        var submission = managedSubmission!;
+        if (submission.State == "rejected")
+            return new ComfyGraftJob { JobId = submission.PromptId, State = "rejected" };
+        ComfyGraftJob job;
+        try
+        {
+            job = await comfyApi.GetGraftJob(submission.PromptId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception e)
+        {
+            throw UnresolvedSubmission(submission.PromptId, submission.State, e);
+        }
+
+        if (!String.Equals(job.JobId, submission.PromptId, StringComparison.Ordinal))
+            throw UnresolvedSubmission(submission.PromptId, "uncertain");
+
+        var state = job.EffectiveState;
+        managedSubmission = submission with { State = state };
+        managedSubmissionJournal!.Save(managedSubmission);
+        return job;
+    }
+
+    private static bool IsDefinitiveRejection(ApiException error, string promptId)
+    {
+        if ((int)error.StatusCode is not (400 or 409 or 422) || error.Content is null)
+            return false;
+        try
+        {
+            using var body = JsonDocument.Parse(error.Content);
+            return body.RootElement.TryGetProperty("prompt_id", out var id)
+                && id.ValueKind == JsonValueKind.String && id.GetString() == promptId
+                && body.RootElement.TryGetProperty("graft", out var graft)
+                && graft.ValueKind == JsonValueKind.Object
+                && graft.TryGetProperty("state", out var state)
+                && state.ValueKind == JsonValueKind.String && state.GetString() == "rejected";
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsAccepted(string state) => state is "accepted" or "running";
+
+    private static bool IsTerminal(string state) =>
+        state is "rejected" or "completed" or "failed" or "cancelled";
+
+    private static bool IsUnresolved(string state) =>
+        state is "created" or "submitting" or "uncertain" or "lost";
+
+    private static InvalidOperationException UnresolvedSubmission(string jobId, string state, Exception? inner = null) =>
+        new($"Managed Comfy job {jobId} remains unresolved (state: {state}); it will not be resubmitted.", inner);
+
+    private async Task ReconcileAfterReconnectAsync()
+    {
+        try
+        {
+            await ReconcileManagedSubmissionAsync().ConfigureAwait(false);
+        }
+        catch (Exception e)
+        {
+            Logger.Warn(e, "Could not reconcile managed Comfy job {JobId}", ManagedJobId);
+        }
     }
 
     public async Task InterruptPromptAsync(CancellationToken cancellationToken = default)
     {
-        await comfyApi.PostInterrupt(cancellationToken).ConfigureAwait(false);
+        if (managedSubmissionJournal is not null)
+        {
+            await managedSubmissionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                var jobId = ManagedJobId;
+                if (jobId is null)
+                    return;
+                var result = await comfyApi.CancelGraftJob(jobId, cancellationToken).ConfigureAwait(false);
+                if (!result.Cancelled)
+                    throw new InvalidOperationException($"Managed Comfy job {jobId} was not cancelled.");
+                managedSubmission = managedSubmission! with { State = "cancelled" };
+                managedSubmissionJournal.Save(managedSubmission);
+            }
+            finally
+            {
+                managedSubmissionGate.Release();
+            }
+        }
+        else
+        {
+            await comfyApi.PostInterrupt(cancellationToken).ConfigureAwait(false);
+        }
 
-        // Set the current task to null, and remove it from the dictionary
         if (currentPromptTask is { } task)
         {
             PromptTasks.TryRemove(task.Id, out _);

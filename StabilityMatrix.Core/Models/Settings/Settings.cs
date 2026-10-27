@@ -287,6 +287,10 @@ public class Settings
 
     public string? ModelDirectoryOverride { get; set; } = null;
 
+    public RemoteComfySettings RemoteComfy { get; set; } = new();
+
+    public RemoteModelPublishingSettings RemoteModelPublishing { get; set; } = new();
+
     public GpuInfo? PreferredGpu { get; set; }
 
     public int MaxConcurrentDownloads { get; set; }

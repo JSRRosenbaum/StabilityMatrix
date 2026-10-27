@@ -38,6 +38,7 @@ using StabilityMatrix.Core.Models.FileInterfaces;
 using StabilityMatrix.Core.Models.Inference;
 using StabilityMatrix.Core.Models.Packages;
 using StabilityMatrix.Core.Models.Progress;
+using StabilityMatrix.Core.Processes;
 using StabilityMatrix.Core.Services;
 using InferenceTabViewModelBase = StabilityMatrix.Avalonia.ViewModels.Base.InferenceTabViewModelBase;
 using Path = System.IO.Path;
@@ -94,7 +95,8 @@ public partial class InferenceViewModel : PageViewModelBase, IAsyncDisposable
     [NotifyPropertyChangedFor(nameof(IsComfyRunning))]
     private PackagePair? runningPackage;
 
-    public bool IsComfyRunning => RunningPackage?.BasePackage is ComfyUI;
+    public bool IsComfyRunning =>
+        settingsManager.Settings.RemoteComfy.IsEnabled || RunningPackage?.BasePackage is ComfyUI;
 
     private IDisposable? onStartupComplete;
 
@@ -175,11 +177,15 @@ public partial class InferenceViewModel : PageViewModelBase, IAsyncDisposable
             return;
         }
 
-        var comfyViewModel = newItems.FirstOrDefault(
-            vm =>
-                vm.RunningPackage.InstalledPackage.Id == selectedPackageId
-                || vm.RunningPackage.BasePackage is ComfyUI
+        var comfyViewModel = newItems.FirstOrDefault(vm =>
+            vm.RunningPackage.InstalledPackage.Id == selectedPackageId
+            || vm.RunningPackage.BasePackage is ComfyUI
         );
+
+        if (settingsManager.Settings.RemoteComfy.IsEnabled)
+        {
+            return;
+        }
 
         if (comfyViewModel is null && RunningPackage?.BasePackage is ComfyUI)
         {
@@ -291,7 +297,7 @@ public partial class InferenceViewModel : PageViewModelBase, IAsyncDisposable
                         {
                             IsOpen = false,
                             IsSelected = false,
-                            CurrentTabIndex = -1
+                            CurrentTabIndex = -1,
                         }
                     );
                 }
@@ -302,6 +308,14 @@ public partial class InferenceViewModel : PageViewModelBase, IAsyncDisposable
         {
             AddTab(InferenceProjectType.TextToImage);
         }
+        if (settingsManager.Settings.RemoteComfy.IsEnabled)
+        {
+            await notificationService.TryAsync(
+                ClientManager.ConnectAsync(),
+                "Could not connect to remote Comfy backend"
+            );
+        }
+
     }
 
     /// <summary>
@@ -361,8 +375,8 @@ public partial class InferenceViewModel : PageViewModelBase, IAsyncDisposable
             return;
         }
 
-        var entry = await liteDbContext.InferenceProjects.FindOneAsync(
-            p => p.FilePath == projectFile.ToString()
+        var entry = await liteDbContext.InferenceProjects.FindOneAsync(p =>
+            p.FilePath == projectFile.ToString()
         );
 
         // Create if not found
@@ -481,6 +495,20 @@ public partial class InferenceViewModel : PageViewModelBase, IAsyncDisposable
             return;
         }
 
+        if (settingsManager.Settings.RemoteComfy.IsEnabled)
+        {
+            var result = await notificationService.TryAsync(
+                ClientManager.ConnectAsync(cancellationToken),
+                "Could not connect to remote Comfy backend"
+            );
+
+            if (result.Exception is { } exception)
+            {
+                Logger.Error(exception, "Failed to connect to remote Inference backend");
+            }
+            return;
+        }
+
         if (RunningPackage is not null)
         {
             var result = await notificationService.TryAsync(
@@ -493,6 +521,20 @@ public partial class InferenceViewModel : PageViewModelBase, IAsyncDisposable
                 Logger.Error(exception, "Failed to connect to Inference backend");
             }
         }
+    }
+
+    [RelayCommand]
+    private async Task OpenEditor()
+    {
+        if (ClientManager.Client is not { } client)
+            return;
+
+        var editorUrl = client.BaseAddress.AbsoluteUri;
+        await notificationService.TryAsync(
+            Task.Run(() => ProcessRunner.OpenUrl(editorUrl)),
+            "Failed to open ComfyUI editor",
+            editorUrl
+        );
     }
 
     /// <summary>
@@ -547,7 +589,7 @@ public partial class InferenceViewModel : PageViewModelBase, IAsyncDisposable
                     {
                         Patterns = new[] { "*.smproj" },
                         MimeTypes = new[] { "application/json" },
-                    }
+                    },
                 },
                 SuggestedStartLocation = startDir,
                 DefaultExtension = ".smproj",
@@ -720,8 +762,8 @@ public partial class InferenceViewModel : PageViewModelBase, IAsyncDisposable
             InferenceProjectType.ImageToImage => scope.ServiceManager.Get<InferenceImageToImageViewModel>(),
             InferenceProjectType.ImageToVideo => scope.ServiceManager.Get<InferenceImageToVideoViewModel>(),
             InferenceProjectType.Upscale => scope.ServiceManager.Get<InferenceImageUpscaleViewModel>(),
-            InferenceProjectType.FluxTextToImage
-                => scope.ServiceManager.Get<InferenceFluxTextToImageViewModel>(),
+            InferenceProjectType.FluxTextToImage =>
+                scope.ServiceManager.Get<InferenceFluxTextToImageViewModel>(),
         };
 
         switch (vm)
@@ -774,7 +816,7 @@ public partial class InferenceViewModel : PageViewModelBase, IAsyncDisposable
                     {
                         Patterns = new[] { "*.smproj" },
                         MimeTypes = new[] { "application/json" },
-                    }
+                    },
                 },
                 SuggestedStartLocation = startDir,
             }

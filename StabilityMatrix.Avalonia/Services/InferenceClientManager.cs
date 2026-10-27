@@ -40,6 +40,8 @@ public partial class InferenceClientManager : ObservableObject, IInferenceClient
     [NotifyPropertyChangedFor(nameof(IsConnected), nameof(CanUserConnect))]
     private ComfyClient? client;
 
+    private readonly SemaphoreSlim connectionLock = new(1, 1);
+
     [MemberNotNullWhen(true, nameof(Client))]
     public virtual bool IsConnected => Client is not null;
 
@@ -160,7 +162,8 @@ public partial class InferenceClientManager : ObservableObject, IInferenceClient
         IApiFactory apiFactory,
         IModelIndexService modelIndexService,
         ISettingsManager settingsManager,
-        ICompletionProvider completionProvider
+        ICompletionProvider completionProvider,
+        IRemoteModelPublisher remoteModelPublisher
     )
     {
         this.logger = logger;
@@ -168,6 +171,20 @@ public partial class InferenceClientManager : ObservableObject, IInferenceClient
         this.modelIndexService = modelIndexService;
         this.settingsManager = settingsManager;
         this.completionProvider = completionProvider;
+
+        remoteModelPublisher.PublicationReady += (_, _) =>
+        {
+            if (!IsConnected)
+            {
+                return;
+            }
+
+            LoadSharedPropertiesAsync()
+                .SafeFireAndForget(ex =>
+                {
+                    logger.LogWarning(ex, "Failed to refresh remote model list after publication");
+                });
+        };
 
         modelsSource
             .Connect()
@@ -846,15 +863,36 @@ public partial class InferenceClientManager : ObservableObject, IInferenceClient
         CancellationToken cancellationToken = default
     )
     {
-        if (IsConnected)
-            return;
-
-        IsConnecting = true;
+        await connectionLock.WaitAsync(cancellationToken);
         try
         {
+            var managed = settingsManager.Settings.RemoteComfy.IsEnabled;
+            if (IsConnected && Client.BaseAddress == uri && Client.IsManaged == managed)
+                return;
+
+            if (IsConnected)
+            {
+                await Client.CloseAsync(cancellationToken);
+                Client = null;
+                ResetSharedProperties();
+            }
+
+            IsConnecting = true;
             logger.LogDebug("Connecting to {@Uri}...", uri);
 
-            var tempClient = new ComfyClient(apiFactory, uri);
+            var endpointIdentity = uri.GetComponents(
+                UriComponents.SchemeAndServer | UriComponents.Path, UriFormat.UriEscaped
+            ).TrimEnd('/');
+            var endpointHash = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(endpointIdentity))
+            );
+            var tempClient = managed
+                ? new ComfyClient(
+                    apiFactory,
+                    uri,
+                    System.IO.Path.Combine(settingsManager.LibraryDir, $".graft-submissions.{endpointHash}.json")
+                )
+                : new ComfyClient(apiFactory, uri);
 
             await tempClient.ConnectAsync(cancellationToken);
             logger.LogDebug("Connected to {@Uri}", uri);
@@ -870,10 +908,9 @@ public partial class InferenceClientManager : ObservableObject, IInferenceClient
             }
 
             Client = tempClient;
-
             await LoadSharedPropertiesAsync();
         }
-        catch (Exception)
+        catch
         {
             Client = null;
             throw;
@@ -881,6 +918,7 @@ public partial class InferenceClientManager : ObservableObject, IInferenceClient
         finally
         {
             IsConnecting = false;
+            connectionLock.Release();
         }
     }
 
@@ -923,7 +961,17 @@ public partial class InferenceClientManager : ObservableObject, IInferenceClient
     /// <inheritdoc />
     public virtual Task ConnectAsync(CancellationToken cancellationToken = default)
     {
-        return ConnectAsyncImpl(new Uri("http://127.0.0.1:8188"), cancellationToken: cancellationToken);
+        var remoteComfy = settingsManager.Settings.RemoteComfy;
+        var url = remoteComfy.IsEnabled ? remoteComfy.BaseUrl : "http://127.0.0.1:8188";
+        if (
+            !Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+        )
+        {
+            throw new InvalidOperationException("Remote Comfy URL must be an absolute http(s) URL.");
+        }
+
+        return ConnectAsyncImpl(uri, cancellationToken: cancellationToken);
     }
 
     /// <inheritdoc />

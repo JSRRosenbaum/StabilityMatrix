@@ -15,9 +15,17 @@ public class MockInferenceClientManager : InferenceClientManager
         IApiFactory apiFactory,
         IModelIndexService modelIndexService,
         ISettingsManager settingsManager,
-        ICompletionProvider completionProvider
+        ICompletionProvider completionProvider,
+        IRemoteModelPublisher remoteModelPublisher
     )
-        : base(logger, apiFactory, modelIndexService, settingsManager, completionProvider)
+        : base(
+            logger,
+            apiFactory,
+            modelIndexService,
+            settingsManager,
+            completionProvider,
+            remoteModelPublisher
+        )
     {
         // Load our initial models
         ResetSharedProperties();

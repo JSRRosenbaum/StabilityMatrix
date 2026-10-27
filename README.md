@@ -50,6 +50,7 @@
 Multi-Platform Package Manager and Inference UI for Stable Diffusion
 
 See the [documentation index](docs/README.md) for installation, package management, models, and Inference guides. Start with [your first image](docs/inference/text-to-image.md), [importing local models](docs/checkpoint-manager/overview.md#import-local-models), or [managing installed packages](docs/package-manager/managing-packages.md).
+For a separately managed Comfy endpoint, see the [managed backend guide](docs/inference/managed-backend.md) and [Graft integration](https://github.com/JSRRosenbaum/Graft).
 
 ### 🖱️ One click install and update for Stable Diffusion Web UI Packages
 - Supports:

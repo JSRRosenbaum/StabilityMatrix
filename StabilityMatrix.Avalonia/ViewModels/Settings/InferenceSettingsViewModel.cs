@@ -36,6 +36,7 @@ public partial class InferenceSettingsViewModel : PageViewModelBase
     private readonly INotificationService notificationService;
     private readonly ISettingsManager settingsManager;
     private readonly ICompletionProvider completionProvider;
+    private readonly IRemoteModelPublisher remoteModelPublisher;
 
     /// <inheritdoc />
     public override string Title => "Inference";
@@ -71,6 +72,21 @@ public partial class InferenceSettingsViewModel : PageViewModelBase
 
     [ObservableProperty]
     private bool useLegacySearch;
+
+    [ObservableProperty]
+    private bool isRemoteComfyEnabled;
+
+    [ObservableProperty]
+    private string remoteComfyBaseUrl = "http://127.0.0.1:8188";
+
+    [ObservableProperty]
+    private bool isRemoteModelPublishingEnabled;
+
+    [ObservableProperty]
+    private string? remoteModelPublishingDestination;
+
+    [ObservableProperty]
+    private string remoteModelPublishingStatus = "Remote publish journal not loaded";
 
     private List<string> ignoredFileNameFormatVars =
     [
@@ -109,12 +125,14 @@ public partial class InferenceSettingsViewModel : PageViewModelBase
         IModelIndexService modelIndexService,
         INavigationService<SettingsViewModel> settingsNavigationService,
         IAccountsService accountsService,
-        ISettingsManager settingsManager
+        ISettingsManager settingsManager,
+        IRemoteModelPublisher remoteModelPublisher
     )
     {
         this.settingsManager = settingsManager;
         this.notificationService = notificationService;
         this.completionProvider = completionProvider;
+        this.remoteModelPublisher = remoteModelPublisher;
 
         settingsManager.RelayPropertyFor(
             this,
@@ -156,6 +174,36 @@ public partial class InferenceSettingsViewModel : PageViewModelBase
             settings => settings.UseLegacySearch,
             true
         );
+
+        settingsManager.RelayPropertyFor(
+            this,
+            vm => vm.IsRemoteComfyEnabled,
+            settings => settings.RemoteComfy.IsEnabled,
+            true
+        );
+
+        settingsManager.RelayPropertyFor(
+            this,
+            vm => vm.RemoteComfyBaseUrl,
+            settings => settings.RemoteComfy.BaseUrl,
+            true
+        );
+
+        settingsManager.RelayPropertyFor(
+            this,
+            vm => vm.IsRemoteModelPublishingEnabled,
+            settings => settings.RemoteModelPublishing.IsEnabled,
+            true
+        );
+
+        settingsManager.RelayPropertyFor(
+            this,
+            vm => vm.RemoteModelPublishingDestination,
+            settings => settings.RemoteModelPublishing.Destination,
+            true
+        );
+
+        RefreshRemoteModelPublishingStatusCommand.Execute(null);
 
         this.WhenPropertyChanged(vm => vm.OutputImageFileNameFormat)
             .Throttle(TimeSpan.FromMilliseconds(50))
@@ -335,6 +383,31 @@ public partial class InferenceSettingsViewModel : PageViewModelBase
     private void RemoveSelectedRow(string item)
     {
         FavoriteDimensions.Remove(item);
+    }
+
+    [RelayCommand]
+    private async Task RefreshRemoteModelPublishingStatus()
+    {
+        var entries = await remoteModelPublisher.ReadJournalAsync();
+        if (entries.Count == 0)
+        {
+            RemoteModelPublishingStatus = "No remote publication entries.";
+            return;
+        }
+
+        var counts = entries.GroupBy(e => e.State).ToDictionary(g => g.Key, g => g.Count());
+        RemoteModelPublishingStatus = string.Join(
+            ", ",
+            Enum.GetValues<RemoteModelPublishState>()
+                .Select(state => $"{state}: {counts.GetValueOrDefault(state)}")
+        );
+    }
+
+    [RelayCommand]
+    private async Task RetryRemoteModelPublishing()
+    {
+        await remoteModelPublisher.RetryIncompleteAsync();
+        await RefreshRemoteModelPublishingStatus();
     }
 
     #endregion

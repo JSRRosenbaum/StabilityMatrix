@@ -48,8 +48,11 @@ public partial class LaunchPageViewModel : PageViewModelBase, IDisposable, IAsyn
     private readonly ISettingsManager settingsManager;
     private readonly IPyRunner pyRunner;
     private readonly INotificationService notificationService;
+
     private readonly ISharedFolders sharedFolders;
     private readonly IServiceManager<ViewModelBase> dialogFactory;
+    private readonly IInferenceClientManager? inferenceClientManager;
+    private readonly RunningPackageService? runningPackageService;
     protected readonly IPackageFactory PackageFactory;
 
     // Regex to match if input contains a yes/no prompt,
@@ -114,7 +117,9 @@ public partial class LaunchPageViewModel : PageViewModelBase, IDisposable, IAsyn
         IPyRunner pyRunner,
         INotificationService notificationService,
         ISharedFolders sharedFolders,
-        IServiceManager<ViewModelBase> dialogFactory
+        IServiceManager<ViewModelBase> dialogFactory,
+        IInferenceClientManager? inferenceClientManager = null,
+        RunningPackageService? runningPackageService = null
     )
     {
         this.logger = logger;
@@ -124,7 +129,8 @@ public partial class LaunchPageViewModel : PageViewModelBase, IDisposable, IAsyn
         this.notificationService = notificationService;
         this.sharedFolders = sharedFolders;
         this.dialogFactory = dialogFactory;
-
+        this.inferenceClientManager = inferenceClientManager;
+        this.runningPackageService = runningPackageService;
         settingsManager.RelayPropertyFor(
             this,
             vm => vm.SelectedPackage,
@@ -272,6 +278,36 @@ public partial class LaunchPageViewModel : PageViewModelBase, IDisposable, IAsyn
                     NotificationType.Error
                 )
             );
+            return;
+        }
+
+        if (settingsManager.Settings.RemoteComfy.IsEnabled && basePackage is ComfyUI)
+        {
+            if (runningPackageService?.RunningPackages.ContainsKey(activeInstall.Id) == true)
+            {
+                notificationService.Show(new Notification(
+                    "Local Comfy is still running",
+                    "Preserve its queued work. Stop the local package explicitly before switching to managed Comfy.",
+                    NotificationType.Warning
+                ));
+                return;
+            }
+
+            var clientManager =
+                inferenceClientManager
+                ?? throw new InvalidOperationException("Inference client manager is unavailable.");
+            var connection = await notificationService.TryAsync(
+                clientManager.ConnectAsync(),
+                "Could not connect to managed Comfy backend"
+            );
+            if (connection.Exception is not null)
+            {
+                return;
+            }
+
+            webUiUrl = settingsManager.Settings.RemoteComfy.BaseUrl;
+            ShowWebUiButton = !string.IsNullOrWhiteSpace(webUiUrl);
+            OpenWebUi();
             return;
         }
 

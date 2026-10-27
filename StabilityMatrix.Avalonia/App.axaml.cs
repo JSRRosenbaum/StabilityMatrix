@@ -439,6 +439,7 @@ public sealed class App : Application
         }
 
         Services.GetRequiredService<ProgressManagerViewModel>().StartEventListener();
+        _ = Services.GetRequiredService<RemoteModelPublishDownloadBridge>();
     }
 
     internal static void ConfigurePageViewModels(IServiceCollection services)
@@ -557,8 +558,14 @@ public sealed class App : Application
 
         // Other services
         services.AddSingleton<ITrackedDownloadService, TrackedDownloadService>();
+        services.AddSingleton<IRemoteModelTransfer, RSyncRemoteModelTransfer>();
+        services.AddSingleton<IRemoteModelPublisher, RemoteModelPublisher>();
+        services.AddSingleton<RemoteModelPublishDownloadBridge>();
         services.AddSingleton<IDisposable>(provider =>
             (IDisposable)provider.GetRequiredService<ITrackedDownloadService>()
+        );
+        services.AddSingleton<IDisposable>(provider =>
+            provider.GetRequiredService<RemoteModelPublishDownloadBridge>()
         );
 
         // Rich presence

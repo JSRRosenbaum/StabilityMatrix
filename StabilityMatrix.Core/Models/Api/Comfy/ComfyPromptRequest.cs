@@ -7,6 +7,10 @@ public class ComfyPromptRequest
 {
     [JsonPropertyName("client_id")]
     public required string ClientId { get; set; }
+
+    [JsonPropertyName("prompt_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? PromptId { get; set; }
     
     [JsonPropertyName("prompt")]
     public required Dictionary<string, ComfyNode> Prompt { get; set; }

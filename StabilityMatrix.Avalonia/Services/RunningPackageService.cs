@@ -28,7 +28,8 @@ public partial class RunningPackageService(
     IPackageFactory packageFactory,
     INotificationService notificationService,
     ISettingsManager settingsManager,
-    IPyRunner pyRunner
+    IPyRunner pyRunner,
+    IInferenceClientManager inferenceClientManager
 ) : ObservableObject, IDisposable
 {
     /// <summary>
@@ -48,13 +49,20 @@ public partial class RunningPackageService(
     {
         // Get lock
         using var @lock = await packageLocks.LockAsync(installedPackage.Id, cancellationToken);
-
-        // Ignore if already running after lock
-        if (RunningPackages.ContainsKey(installedPackage.Id))
+        if (
+            settingsManager.Settings.RemoteComfy.IsEnabled
+            && RunningPackages.TryGetValue(installedPackage.Id, out var existingPackage)
+            && existingPackage.RunningPackage.BasePackage is ComfyUI
+        )
         {
-            logger.LogWarning("Skipping StartPackage, already running: {Id}", installedPackage.Id);
+            notificationService.Show(new Notification(
+                "Local Comfy is still running",
+                "Preserve its queued work. Stop the local package explicitly before switching to managed Comfy.",
+                NotificationType.Warning
+            ));
             return null;
         }
+
 
         var activeInstallName = installedPackage.PackageName;
         var basePackage = string.IsNullOrWhiteSpace(activeInstallName)
@@ -77,6 +85,33 @@ public partial class RunningPackageService(
             );
             return null;
         }
+
+        if (settingsManager.Settings.RemoteComfy.IsEnabled && basePackage is ComfyUI)
+        {
+            var connection = await notificationService.TryAsync(
+                inferenceClientManager.ConnectAsync(cancellationToken),
+                "Could not connect to managed Comfy backend"
+            );
+            if (connection.Exception is not null)
+            {
+                return null;
+            }
+
+            var editorUrl = settingsManager.Settings.RemoteComfy.BaseUrl;
+            notificationService.TryAsync(
+                Task.Run(() => ProcessRunner.OpenUrl(editorUrl)),
+                "Failed to open managed Comfy editor",
+                editorUrl
+            );
+            return null;
+        }
+        // Ignore if already running after the remote attach path.
+        if (RunningPackages.ContainsKey(installedPackage.Id))
+        {
+            logger.LogWarning("Skipping StartPackage, already running: {Id}", installedPackage.Id);
+            return null;
+        }
+
 
         // Show warning if critical vulnerabilities are found
         if (basePackage.HasCriticalVulnerabilities)
@@ -266,10 +301,7 @@ public partial class RunningPackageService(
 
     public async Task StopPackage(Guid id, CancellationToken cancellationToken = default)
     {
-        // Get lock
         using var @lock = await packageLocks.LockAsync(id, cancellationToken);
-
-        // Ignore if not running after lock
         if (!RunningPackages.TryGetValue(id, out var vm))
         {
             logger.LogWarning("Skipping StopPackage, not running: {Id}", id);
@@ -278,9 +310,7 @@ public partial class RunningPackageService(
 
         var runningPackage = vm.RunningPackage;
         await runningPackage.BasePackage.WaitForShutdown();
-
         await vm.DisposeAsync();
-
         RunningPackages.Remove(id);
     }
 

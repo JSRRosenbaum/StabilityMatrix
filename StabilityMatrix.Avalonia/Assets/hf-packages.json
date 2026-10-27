@@ -22,8 +22,7 @@
     "ModelName": "Stable Diffusion XL (Base)",
     "RepositoryPath": "stabilityai/stable-diffusion-xl-base-1.0",
     "Files": [
-      "sd_xl_base_1.0_0.9vae.safetensors",
-      "sd_xl_offset_example-lora_1.0.safetensors"
+      "sd_xl_base_1.0_0.9vae.safetensors"
     ],
     "LicenseType": "Open RAIL++",
     "LicensePath": "LICENSE.md"

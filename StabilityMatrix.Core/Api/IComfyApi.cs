@@ -6,6 +6,9 @@ namespace StabilityMatrix.Core.Api;
 [Headers("User-Agent: StabilityMatrix")]
 public interface IComfyApi
 {
+    [Get("/system_stats")]
+    Task<System.Text.Json.JsonElement> GetSystemStats(CancellationToken cancellationToken = default);
+
     [Post("/prompt")]
     Task<ComfyPromptResponse> PostPrompt(
         [Body] ComfyPromptRequest prompt,
@@ -50,6 +53,18 @@ public interface IComfyApi
         string filename,
         string subfolder,
         string type,
+        CancellationToken cancellationToken = default
+    );
+
+    [Get("/graft/jobs/{jobId}")]
+    Task<ComfyGraftJob> GetGraftJob(
+        string jobId,
+        CancellationToken cancellationToken = default
+    );
+
+    [Post("/graft/jobs/{jobId}/cancel")]
+    Task<ComfyGraftCancelResponse> CancelGraftJob(
+        string jobId,
         CancellationToken cancellationToken = default
     );
 }

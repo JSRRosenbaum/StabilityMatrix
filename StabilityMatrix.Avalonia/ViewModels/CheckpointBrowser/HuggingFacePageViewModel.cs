@@ -74,16 +74,13 @@ public partial class HuggingFacePageViewModel : TabViewModelBase
             .Connect()
             .DeferUntilLoaded()
             .Group(i => i.ModelCategory)
-            .Transform(
-                g =>
-                    new CategoryViewModel(
-                        g.Cache.Items,
-                        Design.IsDesignMode ? string.Empty : settingsManager.ModelsDirectory
-                    )
-                    {
-                        Title = g.Key.GetDescription() ?? g.Key.ToString()
-                    }
+            .Transform(g => new CategoryViewModel(
+                g.Cache.Items,
+                Design.IsDesignMode ? string.Empty : settingsManager.ModelsDirectory
             )
+            {
+                Title = g.Key.GetDescription() ?? g.Key.ToString(),
+            })
             .SortBy(vm => vm.Title ?? "")
             .Bind(Categories)
             .WhenAnyPropertyChanged()
@@ -176,6 +173,7 @@ public partial class HuggingFacePageViewModel : TabViewModelBase
 
                 downloadPath.Directory?.Create();
                 var download = trackedDownloadService.NewDownload(url, downloadPath);
+                download.ContextAction = new ModelPostDownloadContextAction();
                 download.ProgressUpdate += DownloadOnProgressUpdate;
                 download.ProgressStateChanged += (_, e) =>
                 {

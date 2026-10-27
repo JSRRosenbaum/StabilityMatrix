@@ -353,10 +353,13 @@ public partial class MainWindow : AppWindowBase
         if (DataContext is not MainWindowViewModel vm)
             return;
 
-        // Navigate to first page
+        // Remote-only clients request the managed backend through native Inference;
+        // they do not need an independently launched local package.
         Dispatcher.UIThread.Post(() =>
             navigationService.NavigateTo(
-                vm.Pages[0],
+                settingsManager.Settings.RemoteComfy.IsEnabled
+                    ? vm.Pages.OfType<InferenceViewModel>().First()
+                    : vm.Pages[0],
                 new BetterSlideNavigationTransition { Effect = SlideNavigationTransitionEffect.FromBottom }
             )
         );
